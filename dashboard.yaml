@@ -1,389 +1,518 @@
-esphome: 
-  name: ha-dashboard 
-  friendly_name: HA Dashboard
+# =============================================================================
+# ESPHome + Home Assistant E-Paper Dashboard
+# -----------------------------------------------------------------------------
+# Runs on a Seeed Studio XIAO 7.5" ePaper Panel (XIAO ESP32-C3 + 800x480
+# e-paper). Sensor/service state is pulled from Home Assistant over the
+# native API and rendered by hand in the `display:` lambda at the bottom of
+# this file - there's no Lovelace card involved, every box/line/icon below
+# is drawn at fixed pixel coordinates.
+#
+# See README.md for the wiring reference, a diagram of how the two screens
+# are chosen, and a step-by-step guide for adding your own sensors/rows.
+# =============================================================================
+
+# --- Quick customization knobs ----------------------------------------------
+# Change these instead of hunting through the lambda below for the things
+# most people want to tweak first. Everything else (sensor entity IDs, box
+# layout) is specific to my setup and documented in the README instead.
+substitutions:
+  device_name: ha-dashboard
+  friendly_name: "HA Dashboard"
+  location_name: "South Queensferry"    # Shown in the top-left box on the home screen
+  refresh_interval: 1800s               # How often the display redraws and flips between the home/Proxmox screens
+  splash_duration: 10s                  # How long the boot splash is shown before switching to the home screen
+  proxmox_row_height: "32"              # Vertical spacing (px) between rows in the Proxmox table
+  service_row_height: "40"              # Vertical spacing (px) between rows in the Service Status box
+
+esphome:
+  name: ${device_name}
+  friendly_name: ${friendly_name}
   on_boot:
     priority: -10.0 # Run after the network and API have connected
     then:
       - script.execute: show_splash_screen
 
-esp32: 
-  board: esp32-c3-devkitm-1 
-  framework: 
-    type: esp-idf 
+esp32:
+  board: esp32-c3-devkitm-1
+  framework:
+    type: esp-idf
 
-# Logging & OTA 
-logger: 
+# Logging & OTA
+logger:
 
-api: 
-  encryption: 
-    key: "[Key generated when setting up the app]" 
+api:
+  encryption:
+    key: "[Key generated when setting up the app]"
 
-ota: 
-  - platform: esphome 
-    password: "[Password generated when setting it up]" 
+ota:
+  - platform: esphome
+    password: "[Password generated when setting it up]"
 
-wifi: 
+wifi:
   ssid: !secret wifi_ssid  #THIS IS SAVED ON ESP32 Portal
-  password: !secret wifi_password 
-  ap: 
-    ssid: "HA-Dashboard Fallback" 
-    password: "fallbackpassword" 
+  password: !secret wifi_password
+  ap:
+    ssid: "HA-Dashboard Fallback"
+    password: "fallbackpassword"
 
-captive_portal: 
+captive_portal:
 
-# Fonts 
-font: 
-  - file: "gfonts://Inter@700" 
-    id: myFont 
-    size: 24 
+# -----------------------------------------------------------------------------
+# Fonts
+# -----------------------------------------------------------------------------
+# ESPHome ships a subset-only font renderer: every MDI glyph used anywhere in
+# the lambda MUST be listed under `glyphs:` for that font or it will render
+# as a blank box. If you add a new icon, add its codepoint here too - look it
+# up by name at https://pictogrammers.com/library/mdi/ (the site shows the
+# codepoint as e.g. F0599; prefix it with "000" and \U to get \U000F0599).
+font:
+  - file: "gfonts://Inter@700"
+    id: myFont       # Headings / large labels
+    size: 24
 
-  - file: "gfonts://Inter@700" 
-    id: myFonts 
-    size: 20 
+  - file: "gfonts://Inter@700"
+    id: myFonts      # Body text / table rows
+    size: 20
 
-  - file: 'fonts/materialdesignicons-webfont.ttf' 
-    id: font_mdi_medium 
-    size: 40 
-    glyphs: &mdi-glyphs 
-      - "\U000F050F"  # thermometer 
-      - "\U000F048D"  # server-network 
-      - "\U000F05E0"  # check-circle 
-      - "\U000F0159"  # close-circle 
-      - "\U000F02DC"  # home 
+  - file: "gfonts://Inter@700"
+    id: fontFooter   # Small status footer text (home screen only)
+    size: 14
+
+  - file: 'fonts/materialdesignicons-webfont.ttf'
+    id: font_mdi_medium
+    size: 40
+    glyphs: &mdi-glyphs
+      - "\U000F050F"  # thermometer
+      - "\U000F048D"  # server-network
+      - "\U000F05E0"  # check-circle
+      - "\U000F0159"  # close-circle
+      - "\U000F02DC"  # home
       - "\U000F035B"  # memory
       - "\U000F02CA"  # disk
       - "\U000F061A"  # cpu
       - "\U000F0906"  # running
+      # Weather condition icons (see the `weather_icon` lambda helper below)
+      - "\U000F0599"  # weather-sunny
+      - "\U000F0594"  # weather-night (clear-night)
+      - "\U000F0595"  # weather-partly-cloudy
+      - "\U000F0590"  # weather-cloudy
+      - "\U000F0591"  # weather-fog (also used for "hazy")
+      - "\U000F0597"  # weather-rainy
+      - "\U000F0596"  # weather-pouring
+      - "\U000F0593"  # weather-lightning
+      - "\U000F067E"  # weather-lightning-rainy
+      - "\U000F0598"  # weather-snowy
+      - "\U000F067F"  # weather-snowy-rainy
+      - "\U000F0592"  # weather-hail
+      - "\U000F059D"  # weather-windy
+      - "\U000F059E"  # weather-windy-variant
+      - "\U000F0028"  # alert-circle (fallback for an unrecognised condition)
 
-# Images 
-image: 
+  # Small icon set used in the status footer (home screen) and the Proxmox
+  # table's per-row status column - sized to sit inline with 18-20px text
+  # instead of the 40px icons above.
+  - file: 'fonts/materialdesignicons-webfont.ttf'
+    id: font_mdi_small
+    size: 18
+    glyphs:
+      - "\U000F05E0"  # check-circle - container/service running
+      - "\U000F0159"  # close-circle - container/service stopped
+      - "\U000F0150"  # clock-outline - last-updated timestamp
+      - "\U000F05A9"  # wifi - Home Assistant API connected
+      - "\U000F05AA"  # wifi-off - Home Assistant API disconnected
+      - "\U000F0028"  # alert-circle - paired with wifi-off
+
+# Images
+image:
   - file: /config/esphome/image/proxmox.jpg
-    id: myImage 
-    type: BINARY 
+    id: myImage
+    type: BINARY
     resize: 800x480
     invert_alpha: true
 
-# SPI config for display 
-spi: 
-  clk_pin: GPIO8 
-  mosi_pin: GPIO10 
+# SPI bus for the display. These pins are wired internally on the XIAO
+# 7.5" ePaper Panel - you only need to change them if you're driving a
+# waveshare panel from a different/bare ESP32 board.
+spi:
+  clk_pin: GPIO8
+  mosi_pin: GPIO10
 
-# Sensors from Home Assistant 
-sensor: 
-  - platform: homeassistant 
-    id: temp_downstairs 
-    entity_id: sensor.downstairs_current_temperature 
-    internal: true 
-  - platform: homeassistant 
-    id: temp_upstairs 
-    entity_id: sensor.upstairs_current_temperature 
-    internal: true 
-  - platform: homeassistant 
-    id: temp_atic 
-    entity_id: sensor.atic_temperature 
-    internal: true 
-  - platform: homeassistant 
-    id: temp_garage 
-    entity_id: sensor.garage_temperature 
-    internal: true 
-  - platform: homeassistant 
-    id: temp_comms 
-    entity_id: sensor.racksensor_temperature 
-    internal: true 
-  - platform: homeassistant 
-    entity_id: weather.forecast_home 
-    attribute: "temperature" 
-    id: outside_temperature 
-    internal: true 
-  - platform: homeassistant 
-    entity_id: weather.forecast_home 
-    id: wind_speed 
-    attribute: "wind_speed" 
-    unit_of_measurement: "km/h" 
-    internal: true 
-  - platform: homeassistant 
-    id: homepage_cpu 
+# -----------------------------------------------------------------------------
+# Sensors pulled from Home Assistant
+# -----------------------------------------------------------------------------
+# All entries below use `platform: homeassistant`, which subscribes to an
+# existing HA entity's state and mirrors it on the ESP - nothing here creates
+# new entities in Home Assistant (see the diagnostics block near the end for
+# the one exception). `internal: true` just hides them from the ESPHome API
+# entity list since they only exist to feed the display lambda.
+sensor:
+  # --- Indoor / outdoor temperatures ---
+  - platform: homeassistant
+    id: temp_downstairs
+    entity_id: sensor.downstairs_current_temperature
+    internal: true
+  - platform: homeassistant
+    id: temp_upstairs
+    entity_id: sensor.upstairs_current_temperature
+    internal: true
+  - platform: homeassistant
+    id: temp_atic
+    entity_id: sensor.atic_temperature
+    internal: true
+  - platform: homeassistant
+    id: temp_garage
+    entity_id: sensor.garage_temperature
+    internal: true
+  - platform: homeassistant
+    id: temp_comms
+    entity_id: sensor.racksensor_temperature
+    internal: true
+
+  # --- Weather (weather.forecast_home) ---
+  - platform: homeassistant
+    entity_id: weather.forecast_home
+    attribute: "temperature"
+    id: outside_temperature
+    internal: true
+  - platform: homeassistant
+    entity_id: weather.forecast_home
+    id: wind_speed
+    attribute: "wind_speed"
+    unit_of_measurement: "km/h"
+    internal: true
+
+  # --- Proxmox LXC 101: Homepage ---
+  - platform: homeassistant
+    id: homepage_cpu
     entity_id: sensor.lxc_homepage_101_cpu_used
     internal: true
-  - platform: homeassistant 
-    id: homepage_ram 
+  - platform: homeassistant
+    id: homepage_ram
     entity_id: sensor.lxc_homepage_101_memory_used_percentage
     internal: true
-  - platform: homeassistant 
-    id: homepage_disk 
+  - platform: homeassistant
+    id: homepage_disk
     entity_id: sensor.lxc_homepage_101_disk_used_percentage
     internal: true
-  - platform: homeassistant 
-    id: qbt_cpu 
+
+  # --- Proxmox LXC 102: qBittorrent ---
+  - platform: homeassistant
+    id: qbt_cpu
     entity_id: sensor.lxc_qbt_102_cpu_used
     internal: true
-  - platform: homeassistant 
-    id: qbt_ram 
+  - platform: homeassistant
+    id: qbt_ram
     entity_id: sensor.lxc_qbt_102_memory_used_percentage
     internal: true
-  - platform: homeassistant 
-    id: qbt_disk 
+  - platform: homeassistant
+    id: qbt_disk
     entity_id: sensor.lxc_qbt_102_disk_used_percentage
     internal: true
-  - platform: homeassistant 
-    id: ansible_cpu 
-    entity_id: sensor.lxc_ansible_cn_104_cpu_used 
+
+  # --- Proxmox LXC 104: Ansible control node ---
+  - platform: homeassistant
+    id: ansible_cpu
+    entity_id: sensor.lxc_ansible_cn_104_cpu_used
     internal: true
-  - platform: homeassistant 
-    id: ansible_ram 
+  - platform: homeassistant
+    id: ansible_ram
     entity_id: sensor.lxc_ansible_cn_104_memory_used_percentage
     internal: true
-  - platform: homeassistant 
-    id: ansible_disk 
+  - platform: homeassistant
+    id: ansible_disk
     entity_id: sensor.lxc_ansible_cn_104_disk_used_percentage
     internal: true
-  - platform: homeassistant 
-    id: plex_cpu 
-    entity_id: sensor.lxc_plex_103_cpu_used 
+
+  # --- Proxmox LXC 103: Plex ---
+  - platform: homeassistant
+    id: plex_cpu
+    entity_id: sensor.lxc_plex_103_cpu_used
     internal: true
-  - platform: homeassistant 
-    id: plex_ram 
+  - platform: homeassistant
+    id: plex_ram
     entity_id: sensor.lxc_plex_103_memory_used_percentage
     internal: true
-  - platform: homeassistant 
-    id: plex_disk 
+  - platform: homeassistant
+    id: plex_disk
     entity_id: sensor.lxc_plex_103_disk_used_percentage
     internal: true
-  - platform: homeassistant 
-    id: pihole_cpu 
-    entity_id: sensor.lxc_pihole_105_cpu_used 
+
+  # --- Proxmox LXC 105: Pi-hole ---
+  - platform: homeassistant
+    id: pihole_cpu
+    entity_id: sensor.lxc_pihole_105_cpu_used
     internal: true
-  - platform: homeassistant 
-    id: pihole_ram 
+  - platform: homeassistant
+    id: pihole_ram
     entity_id: sensor.lxc_pihole_105_memory_used_percentage
     internal: true
-  - platform: homeassistant 
-    id: pihole_disk 
+  - platform: homeassistant
+    id: pihole_disk
     entity_id: sensor.lxc_pihole_105_disk_used_percentage
     internal: true
-  - platform: homeassistant 
-    id: nordvpn_cpu 
-    entity_id: sensor.lxc_nordvpn_106_cpu_used 
+
+  # --- Proxmox LXC 106: NordVPN ---
+  - platform: homeassistant
+    id: nordvpn_cpu
+    entity_id: sensor.lxc_nordvpn_106_cpu_used
     internal: true
-  - platform: homeassistant 
-    id: nordvpn_ram 
+  - platform: homeassistant
+    id: nordvpn_ram
     entity_id: sensor.lxc_nordvpn_106_memory_used_percentage
     internal: true
-  - platform: homeassistant 
-    id: nordvpn_disk 
+  - platform: homeassistant
+    id: nordvpn_disk
     entity_id: sensor.lxc_nordvpn_106_disk_used_percentage
     internal: true
-  - platform: homeassistant 
-    id: vscodeserver_cpu 
-    entity_id: sensor.lxc_vscodeserver_107_cpu_used 
+
+  # --- Proxmox LXC 107: VS Code Server ---
+  - platform: homeassistant
+    id: vscodeserver_cpu
+    entity_id: sensor.lxc_vscodeserver_107_cpu_used
     internal: true
-  - platform: homeassistant 
-    id: vscodeserver_ram 
+  - platform: homeassistant
+    id: vscodeserver_ram
     entity_id: sensor.lxc_vscodeserver_107_memory_used_percentage
     internal: true
-  - platform: homeassistant 
-    id: vscodeserver_disk 
+  - platform: homeassistant
+    id: vscodeserver_disk
     entity_id: sensor.lxc_vscodeserver_107_disk_used_percentage
     internal: true
-  - platform: homeassistant 
-    id: portainer_cpu 
-    entity_id: sensor.lxc_portainer_108_cpu_used 
+
+  # --- Proxmox LXC 108: Portainer ---
+  - platform: homeassistant
+    id: portainer_cpu
+    entity_id: sensor.lxc_portainer_108_cpu_used
     internal: true
-  - platform: homeassistant 
-    id: portainer_ram 
+  - platform: homeassistant
+    id: portainer_ram
     entity_id: sensor.lxc_portainer_108_memory_used_percentage
     internal: true
-  - platform: homeassistant 
-    id: portainer_disk 
+  - platform: homeassistant
+    id: portainer_disk
     entity_id: sensor.lxc_portainer_108_disk_used_percentage
     internal: true
-  - platform: homeassistant 
-    id: n8n_cpu 
-    entity_id: sensor.lxc_n8n_110_cpu_used 
+
+  # --- Proxmox LXC 110: n8n ---
+  - platform: homeassistant
+    id: n8n_cpu
+    entity_id: sensor.lxc_n8n_110_cpu_used
     internal: true
-  - platform: homeassistant 
-    id: n8n_ram 
+  - platform: homeassistant
+    id: n8n_ram
     entity_id: sensor.lxc_n8n_110_memory_used_percentage
     internal: true
-  - platform: homeassistant 
-    id: n8n_disk 
+  - platform: homeassistant
+    id: n8n_disk
     entity_id: sensor.lxc_n8n_110_disk_used_percentage
     internal: true
-  - platform: homeassistant 
-    id: win_cpu 
+
+  # --- Proxmox VM 112: Windows jumpserver ---
+  - platform: homeassistant
+    id: win_cpu
     entity_id: sensor.qemu_vm_win_jumpserver_112_cpu_used
     internal: true
-  - platform: homeassistant 
-    id: win_ram 
+  - platform: homeassistant
+    id: win_ram
     entity_id: sensor.qemu_vm_win_jumpserver_112_memory_used_percentage
     internal: true
-  - platform: homeassistant 
-    id: win_disk 
+  - platform: homeassistant
+    id: win_disk
     entity_id: sensor.qemu_vm_win_jumpserver_112_disk_used_percentage
     internal: true
-  - platform: homeassistant 
+
+  # --- Proxmox host storage pools ---
+  - platform: homeassistant
     id: zfs_disk_perc
     entity_id: sensor.zfs_prox_prod_1_zfs_pool_ssdraid_used_percentage
     internal: true
-  - platform: homeassistant 
+  - platform: homeassistant
     id: local_disk_perc
     entity_id: sensor.storage_prox_prod_1_local_disk_used_percentage
     internal: true
-  - platform: homeassistant 
+  - platform: homeassistant
     id: local_lvm_disk_perc
     entity_id: sensor.storage_prox_prod_1_local_lvm_disk_used_percentage
     internal: true
-  - platform: homeassistant 
+  - platform: homeassistant
     id: zfs_disk_used
     entity_id: sensor.zfs_prox_prod_1_zfs_pool_ssdraid_used
     internal: true
-  - platform: homeassistant 
+  - platform: homeassistant
     id: local_disk_used
     entity_id: sensor.storage_prox_prod_1_local_disk_used
     internal: true
-  - platform: homeassistant 
+  - platform: homeassistant
     id: local_lvm_disk_used
     entity_id: sensor.storage_prox_prod_1_local_lvm_disk_used
     internal: true
-  - platform: homeassistant 
+  - platform: homeassistant
     id: zfs_disk_total
     entity_id: sensor.zfs_prox_prod_1_zfs_pool_ssdraid_total
     internal: true
-  - platform: homeassistant 
+  - platform: homeassistant
     id: local_disk_total
     entity_id: sensor.storage_prox_prod_1_local_disk_total
     internal: true
-  - platform: homeassistant 
+  - platform: homeassistant
     id: local_lvm_disk_total
     entity_id: sensor.storage_prox_prod_1_local_lvm_disk_total
     internal: true
 
-text_sensor: 
-  - platform: homeassistant 
-    entity_id: weather.forecast_home 
-    id: weather_condition 
-    internal: true 
-  - platform: homeassistant 
-    entity_id: sensor.time 
-    id: current_time 
-    internal: true 
-  - platform: homeassistant 
-    id: uptime_rpi 
-    entity_id: sensor.uptimekuma_home_assistant 
-    internal: true 
-  - platform: homeassistant 
-    id: uptime_web 
-    entity_id: sensor.uptimekuma_home_assistant_web_interface 
-    internal: true 
-  - platform: homeassistant 
-    id: uptime_proxmox 
-    entity_id: sensor.uptimekuma_proxmox_web_interface 
-    internal: true 
-  - platform: homeassistant 
-    id: uptime_qbittorrent 
-    entity_id: sensor.uptimekuma_qbittorrent_web_interface 
-    internal: true 
-  - platform: homeassistant 
-    id: uptime_qnap 
-    entity_id: sensor.uptimekuma_qnap_web_interface 
-    internal: true 
-  - platform: homeassistant 
-    id: uptime_semaphore 
-    entity_id: sensor.uptimekuma_semaphore_web_interface 
-    internal: true 
-  - platform: homeassistant 
-    id: uptime_pihole 
-    entity_id: sensor.uptimekuma_pihole_web_interface 
-    internal: true 
-  - platform: homeassistant 
-    id: uptime_portainer 
-    entity_id: sensor.uptimekuma_portainer_web_interface 
-    internal: true 
-  - platform: homeassistant 
-    id: uptime_plex 
-    entity_id: sensor.uptimekuma_plex_web_interface 
-    internal: true 
-  - platform: homeassistant 
+  # --- On-device diagnostics (not sourced from Home Assistant) ---
+  # Powers the small status footer on the home screen so you can tell at a
+  # glance whether the panel is actually still talking to Home Assistant,
+  # instead of silently showing stale data forever.
+  - platform: wifi_signal
+    id: wifi_signal_db
+    internal: true
+    update_interval: 60s
+
+text_sensor:
+  # --- Weather / clock ---
+  - platform: homeassistant
+    entity_id: weather.forecast_home
+    id: weather_condition
+    internal: true
+  - platform: homeassistant
+    entity_id: sensor.time
+    id: current_time
+    internal: true
+
+  # --- Uptime Kuma service monitors (home screen) ---
+  - platform: homeassistant
+    id: uptime_rpi
+    entity_id: sensor.uptimekuma_home_assistant
+    internal: true
+  - platform: homeassistant
+    id: uptime_web
+    entity_id: sensor.uptimekuma_home_assistant_web_interface
+    internal: true
+  - platform: homeassistant
+    id: uptime_proxmox
+    entity_id: sensor.uptimekuma_proxmox_web_interface
+    internal: true
+  - platform: homeassistant
+    id: uptime_qbittorrent
+    entity_id: sensor.uptimekuma_qbittorrent_web_interface
+    internal: true
+  - platform: homeassistant
+    id: uptime_qnap
+    entity_id: sensor.uptimekuma_qnap_web_interface
+    internal: true
+  - platform: homeassistant
+    id: uptime_semaphore
+    entity_id: sensor.uptimekuma_semaphore_web_interface
+    internal: true
+  - platform: homeassistant
+    id: uptime_pihole
+    entity_id: sensor.uptimekuma_pihole_web_interface
+    internal: true
+  - platform: homeassistant
+    id: uptime_portainer
+    entity_id: sensor.uptimekuma_portainer_web_interface
+    internal: true
+  - platform: homeassistant
+    id: uptime_plex
+    entity_id: sensor.uptimekuma_plex_web_interface
+    internal: true
+  - platform: homeassistant
     id: uptime_n8n
-    entity_id: sensor.uptimekuma_n8n_web_interface 
-    internal: true 
-  - platform: homeassistant 
-    id: homepage_status 
+    entity_id: sensor.uptimekuma_n8n_web_interface
+    internal: true
+
+  # --- Proxmox LXC/VM running status (Proxmox screen) ---
+  - platform: homeassistant
+    id: homepage_status
     entity_id: binary_sensor.lxc_homepage_101_status
     internal: true
-  - platform: homeassistant 
-    id: qbt_status 
+  - platform: homeassistant
+    id: qbt_status
     entity_id: binary_sensor.lxc_qbt_102_status
     internal: true
-  - platform: homeassistant 
-    id: plex_status 
+  - platform: homeassistant
+    id: plex_status
     entity_id: binary_sensor.lxc_plex_103_status
     internal: true
-  - platform: homeassistant 
-    id: ansible_status 
+  - platform: homeassistant
+    id: ansible_status
     entity_id: binary_sensor.lxc_ansible_cn_104_status
     internal: true
-  - platform: homeassistant 
-    id: pihole_status 
+  - platform: homeassistant
+    id: pihole_status
     entity_id: binary_sensor.lxc_pihole_105_status
     internal: true
-  - platform: homeassistant 
-    id: nordvpn_status 
+  - platform: homeassistant
+    id: nordvpn_status
     entity_id: binary_sensor.lxc_nordvpn_106_status
     internal: true
-  - platform: homeassistant 
-    id: vscodeserver_status 
+  - platform: homeassistant
+    id: vscodeserver_status
     entity_id: binary_sensor.lxc_vscodeserver_107_status
     internal: true
-  - platform: homeassistant 
-    id: portainer_status 
+  - platform: homeassistant
+    id: portainer_status
     entity_id: binary_sensor.lxc_portainer_108_status
     internal: true
-  - platform: homeassistant 
-    id: n8n_status 
+  - platform: homeassistant
+    id: n8n_status
     entity_id: binary_sensor.lxc_n8n_110_status
     internal: true
-  - platform: homeassistant 
-    id: win_status 
+  - platform: homeassistant
+    id: win_status
     entity_id: binary_sensor.qemu_vm_win_jumpserver_112_status
     internal: true
 
+# On-device diagnostic: true whenever this node has an active Home Assistant
+# API connection. Used by the status footer to show a wifi-off / alert icon
+# instead of confidently displaying data that may be out of date.
+binary_sensor:
+  - platform: status
+    id: node_status
+    internal: true
 
-# A global variable to track which page is active 
-globals: 
-  - id: current_display_page 
-    type: int 
-    initial_value: '0' 
+# A global variable to track which page is active
+globals:
+  - id: current_display_page
+    type: int
+    initial_value: '0'
 
 # Script to control the startup splash screen sequence
 script:
   - id: show_splash_screen
-    mode: single 
+    mode: single
     then:
-      # 1. Switch to the image page
+      # 1. Switch to the Proxmox/image page (also used as the boot splash)
       - lambda: 'id(current_display_page) = 1;'
-      # 2. Force the display to update and show the image
+      # 2. Force the display to update and show it
       - lambda: 'id(my_epaper_display).update();'
-      # 3. Wait for 10 seconds
-      - delay: 10s
-      # 4. Switch back to the main dashboard page
+      # 3. Hold on the splash for a bit
+      - delay: ${splash_duration}
+      # 4. Switch back to the home dashboard page
       - lambda: 'id(current_display_page) = 0;'
       # 5. Force the display to update again to show the dashboard
       - lambda: 'id(my_epaper_display).update();'
 
-# Display 
-display: 
-  - platform: waveshare_epaper 
+# -----------------------------------------------------------------------------
+# Display
+# -----------------------------------------------------------------------------
+# Two screens share one `current_display_page` flag and alternate every
+# `refresh_interval`: page 1 is the Proxmox resource table (drawn over the
+# background image, and reused as the boot splash above), anything else
+# falls through to page 0, the home dashboard. See README.md for a diagram
+# of this flow and for the pixel grid if you want to reposition boxes.
+display:
+  - platform: waveshare_epaper
     id: my_epaper_display
-    cs_pin: GPIO3 
-    dc_pin: GPIO5 
-    busy_pin: 
-      number: GPIO4 
-      inverted: true 
-    reset_pin: GPIO2 
-    model: 7.50inv2 
-    update_interval: 1800s 
-    lambda: |- 
+    cs_pin: GPIO3
+    dc_pin: GPIO5
+    busy_pin:
+      number: GPIO4
+      inverted: true
+    reset_pin: GPIO2
+    model: 7.50inv2
+    update_interval: ${refresh_interval}
+    lambda: |-
       if (id(current_display_page) == 1) {
         // === Main Proxmox Resource Table ===
         it.rectangle(20, 20, 545, 440); // Main container for the 3/4 width table
@@ -409,14 +538,14 @@ display:
             it.printf(330, y, id(myFonts), "%.1f%%", mem_usage);
             // Disk %
             it.printf(410, y, id(myFonts), "%.1f%%", disk_usage);
-            // Status text
-            //const char* status_text = is_running ? "RUN" : "STOP";
-            it.printf(500, y,  id(myFonts), "%s", is_running.c_str());
+            // Status icon - is_running is the raw HA binary_sensor state ("on"/"off")
+            std::string status_icon = (is_running == "on") ? "\U000F05E0" : "\U000F0159";
+            it.printf(500, y, id(font_mdi_small), "%s", status_icon.c_str());
         };
 
         // --- Define Row Positions & Draw Each Service ---
         int base_y = 100;
-        int row_h = 32; // Vertical spacing between rows
+        int row_h = ${proxmox_row_height}; // Vertical spacing between rows
 
         // Replace the placeholder values (true, 15.5, etc.) with your actual sensor IDs.
         // Example: id(homepage_cpu).state, id(homepage_mem).state, etc.
@@ -439,80 +568,119 @@ display:
         it.rectangle(590, 100, 185, 110); // ZFS
         it.rectangle(590, 100, 185, 25); //header box for ZFS
         it.printf(595, 101, id(myFonts), "ZFS");
-        it.printf(595, 130, id(myFonts), "- Used: ");  
-        it.printf(680, 130, id(myFonts), "%.1fGB", id(zfs_disk_used).state); 
-        it.printf(595, 155, id(myFonts), "- Total: ");  
+        it.printf(595, 130, id(myFonts), "- Used: ");
+        it.printf(680, 130, id(myFonts), "%.1fGB", id(zfs_disk_used).state);
+        it.printf(595, 155, id(myFonts), "- Total: ");
         it.printf(680, 155, id(myFonts), "%.1fGB", id(zfs_disk_total).state);
-        it.printf(595, 180, id(myFonts), "- %%: ");  
-        it.printf(680, 180, id(myFonts), "%.1f%%", id(zfs_disk_perc).state); 
-        it.rectangle(590, 220, 185, 110); // LOCAL 
+        it.printf(595, 180, id(myFonts), "- %%: ");
+        it.printf(680, 180, id(myFonts), "%.1f%%", id(zfs_disk_perc).state);
+        it.rectangle(590, 220, 185, 110); // LOCAL
         it.rectangle(590, 220, 185, 25); //header box for Local
         it.printf(595, 221, id(myFonts), "Local");
-        it.printf(595, 250, id(myFonts), "- Used: ");  
-        it.printf(680, 250, id(myFonts), "%.1fGB", id(local_disk_used).state); 
-        it.printf(595, 275, id(myFonts), "- Total: ");  
+        it.printf(595, 250, id(myFonts), "- Used: ");
+        it.printf(680, 250, id(myFonts), "%.1fGB", id(local_disk_used).state);
+        it.printf(595, 275, id(myFonts), "- Total: ");
         it.printf(680, 275, id(myFonts), "%.1fGB", id(local_disk_total).state);
-        it.printf(595, 300, id(myFonts), "- %%: ");  
-        it.printf(680, 300, id(myFonts), "%.1f%%", id(local_disk_perc).state); 
+        it.printf(595, 300, id(myFonts), "- %%: ");
+        it.printf(680, 300, id(myFonts), "%.1f%%", id(local_disk_perc).state);
         it.rectangle(590, 340, 185, 110); // local-lvm
         it.rectangle(590, 340, 185, 25); //header box for Local LVM
         it.printf(595, 341, id(myFonts), "Local-LVM");
-        it.printf(595, 370, id(myFonts), "- Used: ");  
-        it.printf(680, 370, id(myFonts), "%.1fGB", id(local_lvm_disk_used).state); 
-        it.printf(595, 395, id(myFonts), "- Total: ");  
+        it.printf(595, 370, id(myFonts), "- Used: ");
+        it.printf(680, 370, id(myFonts), "%.1fGB", id(local_lvm_disk_used).state);
+        it.printf(595, 395, id(myFonts), "- Total: ");
         it.printf(680, 395, id(myFonts), "%.1fGB", id(local_lvm_disk_total).state);
-        it.printf(595, 420, id(myFonts), "- %%: ");  
-        it.printf(680, 420, id(myFonts), "%.1f%%", id(local_lvm_disk_perc).state); 
-          
-      } else { 
-        // Page 0: Show the main dashboard
-        // === Time & Outside Temperature Box === 
-        it.rectangle(20, 20, 360, 140);
-        it.printf(40, 25, id(font_mdi_medium), "\U000F02DC"); 
-        it.printf(90, 30, id(myFont), "South Queensferry"); 
-        it.printf(40, 80, id(myFont), "Temperature:"); 
-        it.printf(240, 80, id(myFont), "%.1f°C", id(outside_temperature).state); 
-        it.printf(40, 110, id(myFont), "Wind Speed:"); 
-        it.printf(240, 110, id(myFont), "%.1f km/h", id(wind_speed).state); 
+        it.printf(595, 420, id(myFonts), "- %%: ");
+        it.printf(680, 420, id(myFonts), "%.1f%%", id(local_lvm_disk_perc).state);
 
-        // === Temperature Box === 
+      } else {
+        // Page 0: Show the main dashboard
+        // === Time & Outside Temperature Box ===
+        it.rectangle(20, 20, 360, 140);
+        it.printf(40, 25, id(font_mdi_medium), "\U000F02DC");
+        it.printf(90, 30, id(myFont), "${location_name}");
+
+        // Weather condition icon, mapped from the HA weather entity's
+        // condition string. Falls back to an alert icon for anything not
+        // in the list (e.g. "exceptional") so a blank glyph never appears.
+        std::string wx = id(weather_condition).state;
+        std::string wx_icon;
+        if (wx == "sunny") wx_icon = "\U000F0599";
+        else if (wx == "clear-night") wx_icon = "\U000F0594";
+        else if (wx == "partlycloudy") wx_icon = "\U000F0595";
+        else if (wx == "cloudy") wx_icon = "\U000F0590";
+        else if (wx == "fog" || wx == "hazy") wx_icon = "\U000F0591";
+        else if (wx == "rainy") wx_icon = "\U000F0597";
+        else if (wx == "pouring") wx_icon = "\U000F0596";
+        else if (wx == "lightning") wx_icon = "\U000F0593";
+        else if (wx == "lightning-rainy") wx_icon = "\U000F067E";
+        else if (wx == "snowy") wx_icon = "\U000F0598";
+        else if (wx == "snowy-rainy") wx_icon = "\U000F067F";
+        else if (wx == "hail") wx_icon = "\U000F0592";
+        else if (wx == "windy") wx_icon = "\U000F059D";
+        else if (wx == "windy-variant") wx_icon = "\U000F059E";
+        else wx_icon = "\U000F0028";
+        it.printf(300, 20, id(font_mdi_medium), "%s", wx_icon.c_str());
+
+        it.printf(40, 80, id(myFont), "Temperature:");
+        it.printf(240, 80, id(myFont), "%.1f°C", id(outside_temperature).state);
+        it.printf(40, 110, id(myFont), "Wind Speed:");
+        it.printf(240, 110, id(myFont), "%.1f km/h", id(wind_speed).state);
+
+        // === Temperature Box ===
         it.rectangle(20, 180, 360, 280);
         it.printf(40, 200, id(font_mdi_medium), "\U000F050F");
-        it.printf(90, 200, id(myFont), "Home Temperatures"); 
+        it.printf(90, 200, id(myFont), "Home Temperatures");
 
-        it.printf(40, 250, id(myFont), "Downstairs:"); 
-        it.printf(240, 250, id(myFont), "%.1f°C", id(temp_downstairs).state); 
-        it.printf(40, 280, id(myFont), "Upstairs:"); 
-        it.printf(240, 280, id(myFont), "%.1f°C", id(temp_upstairs).state); 
-        it.printf(40, 310, id(myFont), "Attic:"); 
-        it.printf(240, 310, id(myFont), "%.1f°C", id(temp_atic).state); 
-        it.printf(40, 340, id(myFont), "Garage:"); 
-        it.printf(240, 340, id(myFont), "%.1f°C", id(temp_garage).state); 
-        it.printf(40, 370, id(myFont), "Comms Room:"); 
-        it.printf(240, 370, id(myFont), "%.1f°C", id(temp_comms).state); 
+        it.printf(40, 250, id(myFont), "Downstairs:");
+        it.printf(240, 250, id(myFont), "%.1f°C", id(temp_downstairs).state);
+        it.printf(40, 280, id(myFont), "Upstairs:");
+        it.printf(240, 280, id(myFont), "%.1f°C", id(temp_upstairs).state);
+        it.printf(40, 310, id(myFont), "Attic:");
+        it.printf(240, 310, id(myFont), "%.1f°C", id(temp_atic).state);
+        it.printf(40, 340, id(myFont), "Garage:");
+        it.printf(240, 340, id(myFont), "%.1f°C", id(temp_garage).state);
+        it.printf(40, 370, id(myFont), "Comms Room:");
+        it.printf(240, 370, id(myFont), "%.1f°C", id(temp_comms).state);
 
-        // === Service Status Box === 
-        it.rectangle(400, 20, 360, 440); 
+        // === Service Status Box ===
+        it.rectangle(400, 20, 360, 440);
         it.printf(420, 30, id(font_mdi_medium), "\U000F048D");
-        it.printf(470, 30, id(myFont), "Service Status"); 
+        it.printf(470, 30, id(myFont), "Service Status");
 
-        int base_y = 90; 
-        int row_h = 40; 
+        int base_y = 90;
+        int row_h = ${service_row_height};
 
-        auto draw_service = [&](int y, std::string name, std::string value) { 
+        auto draw_service = [&](int y, std::string name, std::string value) {
           std::string icon = (value == "up") ? "\U000F05E0" : "\U000F0159";
-          it.printf(420, y, id(myFont), "%s", name.c_str()); 
-          it.printf(690, y, id(font_mdi_medium), TextAlign::RIGHT, "%s", icon.c_str()); 
-        }; 
+          it.printf(420, y, id(myFont), "%s", name.c_str());
+          it.printf(690, y, id(font_mdi_medium), TextAlign::RIGHT, "%s", icon.c_str());
+        };
 
-        draw_service(base_y + 0 * row_h, "Plex", id(uptime_plex).state); 
-        draw_service(base_y + 1 * row_h, "HA Web UI",    id(uptime_web).state); 
-        draw_service(base_y + 2 * row_h, "Proxmox",      id(uptime_proxmox).state); 
-        draw_service(base_y + 3 * row_h, "qBittorrent",  id(uptime_qbittorrent).state); 
-        draw_service(base_y + 4 * row_h, "QNAP",         id(uptime_qnap).state); 
-        draw_service(base_y + 5 * row_h, "Semaphore",    id(uptime_semaphore).state); 
-        draw_service(base_y + 6 * row_h, "Portainer",    id(uptime_portainer).state); 
-        draw_service(base_y + 7 * row_h, "PiHole",       id(uptime_pihole).state); 
-        draw_service(base_y + 8 * row_h, "n8n", id(uptime_n8n).state); 
+        draw_service(base_y + 0 * row_h, "Plex", id(uptime_plex).state);
+        draw_service(base_y + 1 * row_h, "HA Web UI",    id(uptime_web).state);
+        draw_service(base_y + 2 * row_h, "Proxmox",      id(uptime_proxmox).state);
+        draw_service(base_y + 3 * row_h, "qBittorrent",  id(uptime_qbittorrent).state);
+        draw_service(base_y + 4 * row_h, "QNAP",         id(uptime_qnap).state);
+        draw_service(base_y + 5 * row_h, "Semaphore",    id(uptime_semaphore).state);
+        draw_service(base_y + 6 * row_h, "Portainer",    id(uptime_portainer).state);
+        draw_service(base_y + 7 * row_h, "PiHole",       id(uptime_pihole).state);
+        draw_service(base_y + 8 * row_h, "n8n", id(uptime_n8n).state);
+
+        // === Status Footer ===
+        // Shows when this render actually happened and whether the panel
+        // currently has a live API connection, so stale data is obvious
+        // instead of silently looking "current" for up to a full refresh
+        // interval.
+        it.printf(20, 463, id(font_mdi_small), "\U000F0150");
+        it.printf(42, 462, id(fontFooter), "Updated %s", id(current_time).state.c_str());
+
+        if (id(node_status).state) {
+          it.printf(620, 463, id(font_mdi_small), "\U000F05A9");
+          it.printf(645, 462, id(fontFooter), "Wi-Fi %.0f dBm", id(wifi_signal_db).state);
+        } else {
+          it.printf(620, 463, id(font_mdi_small), "\U000F0028");
+          it.printf(645, 462, id(fontFooter), "API disconnected");
+        }
       }
       id(current_display_page) = !id(current_display_page);
